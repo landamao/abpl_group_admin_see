@@ -1,0 +1,19 @@
+{
+    "启用的群聊": {
+        "description": "启用的群聊",
+        "type": "list",
+        "default": []
+    },
+    "群主提示词": {
+        "description": "群主提示词模板",
+        "hint": "当用户是群主时，增加的提示词模板，请勿修改花括号部分，可留空",
+        "type": "text",
+        "default": "用户「{昵称}」是群主，你应该适当对该用户乖巧一点，尊重ta的身份，也需符合Persona Instructions及其上下文"
+    },
+    "管理员提示词": {
+        "description": "管理员提示词模板",
+        "hint": "当用户是管理员时，增加的提示词模板，请勿修改花括号部分，可留空",
+        "type": "text",
+        "default": "用户「{昵称}」是管理员，你应该适当对该用户礼貌一些，配合ta的工作，也需符合Persona Instructions及其上下文"
+    }
+}
