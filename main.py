@@ -4,21 +4,104 @@ from astrbot.api.event import filter
 from astrbot.core.provider.entities import ProviderRequest
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 
+
+def 解析黑白名单(原列表: list[str]|set[str], 通配符=None) -> tuple[set[str], set[str]]:
+    """
+    解析原始访问控制列表，返回标准化的黑名单和白名单。
+
+    Args:
+        原列表: 原始字符串列表，如 ["all", "/123456", "234567"]
+        通配符: 匹配的通配符，当匹配到通配符时，列表类型使用第一个
+    Returns:
+        tuple[set, set]: 顺序为黑名单，白名单
+    """
+    if 通配符 is None:
+        通配符 = ['*', 'all']
+    # 跳过非字符串和空字符串
+    原列表 = [ i.strip() for i in 原列表 if isinstance(i, str) and i.strip() ]
+    黑名单 = []
+    白名单 = []
+    if 通配符:
+        if isinstance(通配符, (list, tuple)):
+            t = 通配符[0]
+            tl = 通配符
+        elif isinstance(通配符, str):
+            t = 通配符
+            tl = [通配符]
+        else:
+            raise ValueError("通配符类型错误，应为list or str")
+    else:
+        tl = []
+
+    for i in 原列表:
+
+        # 黑名单判断（以 / 开头）
+        if i.startswith('/'):
+            i = i[1:]  # 去掉前缀 /
+            if not i:
+                continue
+            if i in tl:
+                return {t}, set()
+            黑名单.append(i)
+        else:
+            白名单.append(i)
+
+    # 规范化白名单
+    if any(i in 白名单 for i in tl):
+        白名单 = [t]
+
+    白名单 = [ i for i in 白名单 if i not in 黑名单]
+
+    return set(黑名单), set(白名单)
+
+def 检测黑白名单(值:str, 黑白名单:tuple[set[str], set[str]], 通配符=None) -> bool:
+    """检测值是否在黑白名单允许范围内，允许返回True"""
+    if 通配符 is None:
+        通配符 = ['*', 'all']
+    黑名单 = 黑白名单[0]
+    白名单 = 黑白名单[1]
+    if 通配符:
+        if isinstance(通配符, (list, tuple)):
+            t = 通配符[0]
+        elif isinstance(通配符, str):
+            t = 通配符
+        else:
+            raise ValueError("通配符类型错误，应为list or str")
+    else:
+        t = ''
+    if not (黑名单 or 白名单):
+        return False
+    if 黑名单:
+        if t in 黑名单:
+            return False
+        if 值 in 黑名单:
+            return False
+    if 白名单:
+        if t in 白名单:
+            return True
+        if 值 in 白名单:
+            return True
+    # 规范使用通配符，为空则拒绝
+    return False
+
+
 class 管理员识别(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.禁用的群:list[str] = config.启用的群聊
+        self.黑白名单 = 解析黑白名单(config.黑白名单 or ['all'])
         # 缓存格式: {群号: {用户id: 身份(中文)}}
         self.管理员缓存:dict[str,dict]={}
-        # 从配置读取群主和管理员提示词模板，若无则使用默认
+        # 从配置读取各级身份提示词模板，若无则使用默认，留空则不注入
+        self.bot管理员提示词:str = config.get("bot管理员提示词", "")
         self.群主提示词:str = config.群主提示词
         self.管理员提示词:str = config.管理员提示词
+        self.普通成员提示词:str = config.get("普通成员提示词", "")
 
     @event_message_type(EventMessageType.GROUP_MESSAGE)
     async def 入口(self, event: AiocqhttpMessageEvent):
         """消息主入口：缓存群管理员和群主，避免每次都频繁获取"""
-        if (群号:=event.get_group_id()) in self.禁用的群:
+        if not (群号:=event.get_group_id()) or not 检测黑白名单(群号, self.黑白名单):
             return
 
         # 如果该群尚未缓存，则获取成员列表并仅缓存管理员和群主
@@ -30,10 +113,7 @@ class 管理员识别(Star):
                     role = 成员.get('role')
                     if role in ('owner', 'admin'):
                         用户id = str(成员['user_id'])
-                        if role == 'owner':
-                            身份 = '群主'
-                        else:
-                            身份 = '管理员'
+                        身份 = '群主' if role == 'owner' else '管理员'
                         身份映射[用户id] = 身份
                 self.管理员缓存[群号] = 身份映射
                 logger.info(f"已缓存群 {群号} 的管理员/群主信息，共 {len(身份映射)} 人")
@@ -42,25 +122,26 @@ class 管理员识别(Star):
 
     @filter.on_llm_request()
     async def llm请求前(self, event: AiocqhttpMessageEvent, req: ProviderRequest):
-        """若发送者是群主或管理员，则添加对应提示词"""
-        if not (群号:=event.get_group_id()) or 群号 not in self.禁用的群:
+        """按身份等级 bot管理员 > 群主 > 管理员 > 普通成员 添加对应提示词"""
+        if not (群号:=event.get_group_id()) or not 检测黑白名单(群号, self.黑白名单):
             return
 
-        # 从缓存查找该用户的身份（仅当是管理员或群主时存在）
-        身份 = self.管理员缓存.get(群号, {}).get(event.get_sender_id(), None)
+        # 身份判定，优先级从高到低：bot管理员 > 群主 > 管理员 > 普通成员
+        if event.is_admin():
+            身份 = 'bot管理员'
+        else:
+            身份 = self.管理员缓存.get(群号, {}).get(event.get_sender_id(), '普通成员')
 
-        if 身份 is None:
-            # 普通成员或未缓存，直接返回
-            return
-
-        # 根据身份选择模板
-        if 身份 == '群主':
-            extra = self.群主提示词.replace("{昵称}", event.get_sender_name())
-        else:  # 管理员
-            extra = self.管理员提示词.replace("{昵称}", event.get_sender_name())
-
-        # 拼接提示词
-        req.system_prompt += "\n" + extra
+        # 根据身份选择模板，留空（含纯空白）则不注入
+        模板 = {
+            'bot管理员': self.bot管理员提示词,
+            '群主': self.群主提示词,
+            '管理员': self.管理员提示词,
+            '普通成员': self.普通成员提示词,
+        }.get(身份, '') or ''
+        extra = 模板.replace("{昵称}", event.get_sender_name()).strip()
+        if extra:
+            req.system_prompt += "\n" + extra
 
     @filter.command("刷新管理员缓存")
     async def 刷新缓存(self, event: AiocqhttpMessageEvent, aall: str = ''):
@@ -72,12 +153,12 @@ class 管理员识别(Star):
             yield event.plain_result("⚠️ 在私聊使用请添加all参数刷新所有群，或在群里使用刷新当前群")
             return
 
-        if 当前群号 in self.禁用的群:
-            yield event.plain_result("❌ 当前群在禁用列表，请移除后再试")
+        if 当前群号 and not 检测黑白名单(当前群号, self.黑白名单):
+            yield event.plain_result("❌ 当前群被黑白名单限制，本插件未在此群启用")
             return
 
         if aall == 'all':
-            # 刷新所有已缓存的群
+            # 刷新所有已缓存的群（缓存中只会存在黑白名单允许的群）
             if not self.管理员缓存:
                 yield event.plain_result("⚠️ 当前没有已缓存的群，请改用刷新当前群")
                 return
@@ -125,10 +206,13 @@ class 管理员识别(Star):
 
     @filter.llm_tool("get_user_role_in_chat")
     async def 身份工具(self, event: AiocqhttpMessageEvent):
-        """获取发送者在群内（聊天室）的身份，返回用户名字加身份信息。（超管 > 群主 > 管理员）"""
+        """获取发送者在群内（聊天室）的身份，返回用户名字加身份信息。（bot管理员 > 群主 > 管理员 > 普通成员）"""
+        群号 = event.get_group_id()
+        if 群号 and not 检测黑白名单(群号, self.黑白名单):
+            return "本群未启用群管理员识别插件"
         if event.is_admin():
-            return f"用户「{event.get_sender_name()}（{event.get_sender_id()}）」的群内身份为：超管"
-        结果 = self.管理员缓存.get(event.get_group_id(), {}).get(event.get_sender_id(), "普通成员")
+            return f"用户「{event.get_sender_name()}（{event.get_sender_id()}）」的群内身份为：bot管理员"
+        结果 = self.管理员缓存.get(群号, {}).get(event.get_sender_id(), "普通成员")
         return f"用户「{event.get_sender_name()}（{event.get_sender_id()}）」的群内身份为：{结果}"
 
     @filter.llm_tool("get_chat_admins_and_owners")
@@ -137,5 +221,7 @@ class 管理员识别(Star):
         如果用户是群主，你应该对该用户乖巧一点"""
         if not event.get_group_id():
             return "此功能仅能在群聊中使用，当前不是群聊"
+        if not 检测黑白名单(event.get_group_id(), self.黑白名单):
+            return "本群未启用群管理员识别插件"
         结果 = self.管理员缓存.get(event.get_group_id(), {})
         return 结果
