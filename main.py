@@ -206,14 +206,14 @@ class 管理员识别(Star):
 
     @filter.llm_tool("get_user_role_in_chat")
     async def 身份工具(self, event: AiocqhttpMessageEvent):
-        """获取发送者在群内（聊天室）的身份，返回用户名字加身份信息。（bot管理员 > 群主 > 管理员 > 普通成员）"""
+        """获取发送者的身份，返回用户名字加身份信息，bot管理员会同时返回其群内身份。（bot管理员 > 群主 > 管理员 > 普通成员）"""
         群号 = event.get_group_id()
         if 群号 and not 检测黑白名单(群号, self.黑白名单):
             return "本群未启用群管理员识别插件"
+        群内身份 = self.管理员缓存.get(群号, {}).get(event.get_sender_id(), "普通成员")
         if event.is_admin():
-            return f"用户「{event.get_sender_name()}（{event.get_sender_id()}）」的群内身份为：bot管理员"
-        结果 = self.管理员缓存.get(群号, {}).get(event.get_sender_id(), "普通成员")
-        return f"用户「{event.get_sender_name()}（{event.get_sender_id()}）」的群内身份为：{结果}"
+            return f"用户「{event.get_sender_name()}（{event.get_sender_id()}）」是bot管理员，群内身份为：{群内身份}"
+        return f"用户「{event.get_sender_name()}（{event.get_sender_id()}）」的群内身份为：{群内身份}"
 
     @filter.llm_tool("get_chat_admins_and_owners")
     async def 所有管理员工具(self, event: AiocqhttpMessageEvent):
